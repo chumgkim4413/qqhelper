@@ -1,0 +1,350 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="theme-color" content="#0F6B4F" />
+<title>亲情帮手 · 控制端</title>
+<style>
+  :root { --brand:#0F6B4F; --danger:#B3261E; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body { margin:0; padding:0; height:100%; overflow:hidden; background:#0d0f0e; color:#fff;
+    font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Helvetica Neue",sans-serif;
+    -webkit-user-select:none; user-select:none; overscroll-behavior:none; }
+  .screen { position:fixed; inset:0; display:flex; flex-direction:column; }
+  .hidden { display:none !important; }
+
+  #connect { align-items:center; justify-content:center; padding:24px;
+    background:radial-gradient(120% 80% at 50% 0%, #13392d 0%, #0d0f0e 60%); }
+  #connect h1 { font-size:26px; margin:0 0 6px; letter-spacing:1px; }
+  #connect p.sub { color:#9fb3aa; font-size:13px; margin:0 0 30px; text-align:center; }
+  #code { width:100%; max-width:340px; padding:16px; font-size:24px; letter-spacing:6px;
+    text-align:center; text-transform:uppercase; border-radius:14px; border:1px solid #2b3c35;
+    background:#14201b; color:#fff; outline:none; font-family:ui-monospace,Menlo,monospace; }
+  #code:focus { border-color:var(--brand); }
+  #connectBtn { width:100%; max-width:340px; margin-top:18px; padding:18px; font-size:19px; font-weight:600;
+    border:0; border-radius:14px; background:var(--brand); color:#fff; }
+  #connectBtn:disabled { opacity:.55; }
+  #connectMsg { margin-top:18px; font-size:13px; color:#c8d6cf; text-align:center; min-height:20px; padding:0 12px; }
+  .hint { position:absolute; bottom:22px; left:0; right:0; text-align:center; font-size:11px; color:#5d6f67; }
+
+  #control { background:#000; }
+  #topbar { position:absolute; top:0; left:0; right:0; z-index:20; display:flex; align-items:center; gap:8px;
+    padding:calc(env(safe-area-inset-top) + 8px) 12px 8px;
+    background:linear-gradient(to bottom, rgba(0,0,0,.72), rgba(0,0,0,0));
+    font-size:12px; color:#cfe0d8; pointer-events:none; }
+  #dot { width:8px; height:8px; border-radius:50%; background:#e6a23c; }
+  #dot.on { background:#4ade80; }
+  #stage { position:absolute; inset:0; touch-action:none; }
+  video { width:100%; height:100%; object-fit:contain; background:#000; }
+  #tools { position:absolute; left:0; right:0; bottom:0; z-index:20; display:flex; gap:10px;
+    justify-content:center; align-items:center;
+    padding:10px 12px calc(env(safe-area-inset-bottom) + 12px);
+    background:linear-gradient(to top, rgba(0,0,0,.82), rgba(0,0,0,0)); }
+  .tool { flex:1; max-width:96px; padding:14px 0; font-size:14px; font-weight:600;
+    border:1px solid rgba(255,255,255,.16); border-radius:14px;
+    background:rgba(255,255,255,.08); color:#fff; backdrop-filter:blur(8px); }
+  .tool:active { background:rgba(255,255,255,.24); }
+  .tool.red { color:#ff9a92; border-color:rgba(255,120,110,.4); }
+  #toast { position:absolute; left:50%; top:46%; transform:translate(-50%,-50%);
+    background:rgba(0,0,0,.8); padding:14px 22px; border-radius:12px; font-size:15px;
+    z-index:40; max-width:82%; text-align:center; line-height:1.5; }
+</style>
+</head>
+<body>
+
+<div id="connect" class="screen">
+  <h1>亲情帮手</h1>
+  <p class="sub">输入手机上的配对码，就能看到并操作那台手机</p>
+  <input id="code" inputmode="text" autocapitalize="characters" autocomplete="off"
+         spellcheck="false" placeholder="例如 AB3K9X2M" maxlength="16" />
+  <button id="connectBtn">连接</button>
+  <div id="connectMsg"></div>
+  <div class="hint">iPhone 上点分享 → 添加到主屏幕，可当 App 用</div>
+</div>
+
+<div id="control" class="screen hidden">
+  <div id="stage"><video id="video" autoplay playsinline muted></video></div>
+  <div id="topbar"><span id="dot"></span><span id="status">正在连接…</span></div>
+  <div id="tools">
+    <button class="tool" data-act="back">返回</button>
+    <button class="tool" data-act="home">主页</button>
+    <button class="tool" data-act="recents">多任务</button>
+    <button class="tool" data-act="notif">通知栏</button>
+    <button class="tool red" id="disconnect">断开</button>
+  </div>
+  <div id="toast" class="hidden"></div>
+</div>
+
+<script src="mqtt.min.js"></script>
+<script>
+(() => {
+  'use strict';
+  const $ = (id) => document.getElementById(id);
+  const BROKER = 'wss://broker.emqx.io:8084/mqtt';
+  const STUN = [
+    { urls: 'stun:stun.miwifi.com:3478' },
+    { urls: 'stun:stun.chat.bilibili.com:3478' },
+  ];
+
+  const connectScreen = $('connect'), controlScreen = $('control');
+  const codeInput = $('code'), connectBtn = $('connectBtn'), connectMsg = $('connectMsg');
+  const video = $('video'), stage = $('stage'), statusEl = $('status'), dot = $('dot'), toastEl = $('toast');
+
+  let client = null, pc = null, dc = null;
+  let code = '', topicIn = '', topicOut = '';
+  let pendingIce = [], remoteSet = false, readyTimer = null;
+  let connected = false;
+
+  // 这台控制设备的唯一 ID，手机端靠它记住“自己人”
+  const DEVICE_ID = (() => {
+    let d = localStorage.getItem('qq_device');
+    if (!d) {
+      d = 'v' + Math.random().toString(16).slice(2, 10) + Date.now().toString(16);
+      localStorage.setItem('qq_device', d);
+    }
+    return d;
+  })();
+
+  const saved = localStorage.getItem('qq_code');
+  if (saved) codeInput.value = saved;
+
+  function toast(t, ms = 2400) {
+    toastEl.textContent = t; toastEl.classList.remove('hidden');
+    clearTimeout(toast._t); toast._t = setTimeout(() => toastEl.classList.add('hidden'), ms);
+  }
+  function setStatus(t, ok) { statusEl.textContent = t; dot.classList.toggle('on', !!ok); }
+  function pub(obj) {
+    if (client && client.connected) client.publish(topicOut, JSON.stringify(obj), { qos: 1 });
+  }
+
+  function cleanup(keepCodes) {
+    clearInterval(readyTimer);
+    try { dc && dc.close(); } catch (e) {}
+    try { pc && pc.close(); } catch (e) {}
+    try { client && client.end(true); } catch (e) {}
+    pc = null; dc = null; client = null; connected = false;
+    pendingIce = []; remoteSet = false;
+    video.srcObject = null;
+    if (!keepCodes) { topicIn = ''; topicOut = ''; }
+  }
+
+  // ---------- 连接 ----------
+  function connect() {
+    const c = codeInput.value.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+    if (c.length < 4) { connectMsg.textContent = '配对码太短了'; return; }
+    code = c;
+    localStorage.setItem('qq_code', code);
+    topicIn = `qqh/${code}/h2v`;   // 手机 → 我
+    topicOut = `qqh/${code}/v2h`;  // 我 → 手机
+
+    connectBtn.disabled = true;
+    connectMsg.textContent = '正在连配对服务器…';
+    cleanup(true);
+
+    client = mqtt.connect(BROKER, {
+      clientId: 'qqv' + Math.random().toString(16).slice(2, 10),
+      clean: true, connectTimeout: 15000, reconnectPeriod: 3000, protocolVersion: 4,
+    });
+
+    client.on('connect', () => {
+      client.subscribe(topicIn, { qos: 1 }, (err) => {
+        if (err) { connectMsg.textContent = '订阅失败：' + err.message; return; }
+        enterControl();
+        setStatus('已连服务器，等待手机端…', false);
+        pub({ kind: 'ready', id: DEVICE_ID });
+        clearInterval(readyTimer);
+        readyTimer = setInterval(() => pub({ kind: 'ready', id: DEVICE_ID }), 3000);
+      });
+    });
+
+    client.on('message', (_t, payload) => {
+      let msg; try { msg = JSON.parse(payload.toString()); } catch (e) { return; }
+      handle(msg);
+    });
+
+    client.on('error', (e) => {
+      if (!connected) connectMsg.textContent = '服务器连接失败：' + e.message;
+    });
+
+    client.on('close', () => {
+      if (connected) setStatus('连接断开', false);
+    });
+  }
+
+  async function handle(msg) {
+    if (msg.kind === 'hello') {
+      if (!connected) setStatus('手机端在线，正在建立连接…', false);
+      return;
+    }
+    if (msg.kind === 'approval-needed') {
+      setStatus('等待手机那边点「允许」…', false);
+      toast('请让妈妈在手机上点「允许」', 4000);
+      return;
+    }
+    if (msg.kind === 'denied') {
+      setStatus('被拒绝了', false);
+      toast('手机那头点了「拒绝」', 4000);
+      return;
+    }
+    if (msg.kind === 'host-offline') {
+      setStatus('手机端已离线', false);
+      toast('妈妈那边停止了共享，或者网络断了', 4000);
+      return;
+    }
+    if (msg.kind === 'offer') {
+      // 每次收到新邀请都重建连接，避免沿用上一次已失效的会话
+      resetPc();
+      await ensurePc();
+      try {
+        await pc.setRemoteDescription({ type: 'offer', sdp: msg.sdp });
+        remoteSet = true;
+        await flushIce();
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        pub({ kind: 'answer', sdp: answer.sdp });
+        setStatus('正在接收画面…', false);
+      } catch (e) {
+        setStatus('协商失败', false);
+      }
+      return;
+    }
+    if (msg.kind === 'ice') {
+      const cand = { candidate: msg.candidate, sdpMid: msg.mid ?? null, sdpMLineIndex: msg.mline ?? 0 };
+      if (!remoteSet || !pc) { pendingIce.push(cand); return; }
+      try { await pc.addIceCandidate(cand); } catch (e) {}
+    }
+  }
+
+  function resetPc() {
+    try { dc && dc.close(); } catch (e) {}
+    try { pc && pc.close(); } catch (e) {}
+    dc = null; pc = null;
+    remoteSet = false; pendingIce = []; connected = false;
+    video.srcObject = null;
+  }
+
+  async function flushIce() {
+    for (const c of pendingIce) { try { await pc.addIceCandidate(c); } catch (e) {} }
+    pendingIce = [];
+  }
+
+  async function ensurePc() {
+    if (pc) return;
+    pc = new RTCPeerConnection({ iceServers: STUN });
+
+    pc.onicecandidate = (ev) => {
+      if (!ev.candidate) return;
+      const c = ev.candidate;
+      pub({ kind: 'ice', candidate: c.candidate, mid: c.sdpMid, mline: c.sdpMLineIndex });
+    };
+
+    pc.ontrack = (ev) => {
+      video.srcObject = ev.streams[0] || new MediaStream([ev.track]);
+      video.play().catch(() => {});
+      connected = true;
+      setStatus('已连接', true);
+    };
+
+    pc.ondatachannel = (ev) => { dc = ev.channel; };
+
+    pc.onconnectionstatechange = () => {
+      const s = pc.connectionState;
+      if (s === 'connected') { connected = true; setStatus('已连接', true); }
+      else if (s === 'failed') { connected = false; setStatus('直连失败', false); toast('点对点连不上，可能两台网络不互通', 4000); }
+      else if (s === 'disconnected') { setStatus('连接不稳…', false); }
+      else if (s === 'closed') { setStatus('已断开', false); }
+    };
+  }
+
+  function send(obj) {
+    if (dc && dc.readyState === 'open') { dc.send(JSON.stringify(obj)); return true; }
+    toast('控制通道未就绪', 1200);
+    return false;
+  }
+
+  // ---------- 触摸 ----------
+  const clamp01 = (v) => Math.min(1, Math.max(0, v));
+  function mapPoint(cx, cy) {
+    const r = video.getBoundingClientRect();
+    const vw = video.videoWidth || 720, vh = video.videoHeight || 1610;
+    const scale = Math.min(r.width / vw, r.height / vh);
+    const dw = vw * scale, dh = vh * scale;
+    const ox = r.left + (r.width - dw) / 2, oy = r.top + (r.height - dh) / 2;
+    const x = (cx - ox) / dw, y = (cy - oy) / dh;
+    if (x < -0.03 || x > 1.03 || y < -0.03 || y > 1.03) return null;
+    return { x: clamp01(x), y: clamp01(y) };
+  }
+
+  let ptr = null;
+  stage.addEventListener('pointerdown', (e) => {
+    if (!video.srcObject) return;
+    const p = mapPoint(e.clientX, e.clientY);
+    if (!p) return;
+    e.preventDefault();
+    ptr = { sx: e.clientX, sy: e.clientY, lx: e.clientX, ly: e.clientY,
+            at: Date.now(), moved: false, longSent: false, timer: null };
+    ptr.timer = setTimeout(() => {
+      if (!ptr || ptr.moved) return;
+      if (send({ t: 'long', x: p.x, y: p.y })) ptr.longSent = true;
+    }, 620);
+    try { stage.setPointerCapture(e.pointerId); } catch (err) {}
+  }, { passive: false });
+
+  stage.addEventListener('pointermove', (e) => {
+    if (!ptr) return;
+    e.preventDefault();
+    if (Math.hypot(e.clientX - ptr.sx, e.clientY - ptr.sy) > 12) { ptr.moved = true; clearTimeout(ptr.timer); }
+    ptr.lx = e.clientX; ptr.ly = e.clientY;
+  }, { passive: false });
+
+  function endPointer() {
+    if (!ptr) return;
+    clearTimeout(ptr.timer);
+    const start = mapPoint(ptr.sx, ptr.sy), end = mapPoint(ptr.lx, ptr.ly);
+    const dur = Date.now() - ptr.at, cur = ptr;
+    ptr = null;
+    if (!start) return;
+    if (cur.longSent) return;
+    if (!cur.moved && dur < 500) { send({ t: 'tap', x: start.x, y: start.y }); return; }
+    if (end) send({ t: 'swipe', x1: start.x, y1: start.y, x2: end.x, y2: end.y,
+                    dur: Math.min(Math.max(dur, 100), 700) });
+  }
+  stage.addEventListener('pointerup', (e) => { e.preventDefault(); endPointer(); }, { passive: false });
+  stage.addEventListener('pointercancel', () => { ptr = null; });
+
+  document.querySelectorAll('.tool[data-act]').forEach((b) => {
+    b.addEventListener('click', () => send({ t: b.dataset.act }));
+  });
+
+  $('disconnect').addEventListener('click', () => {
+    try { pub({ kind: 'bye' }); } catch (e) {}
+    cleanup();
+    controlScreen.classList.add('hidden');
+    connectScreen.classList.remove('hidden');
+    connectBtn.disabled = false;
+    connectMsg.textContent = '已断开';
+  });
+
+  window.addEventListener('pagehide', () => { try { pub({ kind: 'bye' }); } catch (e) {} });
+
+  connectBtn.addEventListener('click', connect);
+  codeInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') connect(); });
+
+  function enterControl() {
+    connectScreen.classList.add('hidden');
+    controlScreen.classList.remove('hidden');
+  }
+
+  let lastTouch = 0;
+  document.addEventListener('touchend', (e) => {
+    const now = Date.now();
+    if (now - lastTouch < 300) e.preventDefault();
+    lastTouch = now;
+  }, { passive: false });
+})();
+</script>
+</body>
+</html>
